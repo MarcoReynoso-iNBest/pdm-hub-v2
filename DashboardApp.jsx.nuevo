@@ -1,0 +1,678 @@
+'use client';
+
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { LOGO_DATA_URI } from '@/lib/assets';
+
+const STATUSES = [
+  { key: 'pendiente', label: 'Pendiente' },
+  { key: 'progreso', label: 'En progreso' },
+  { key: 'bloqueado', label: 'Bloqueado' },
+  { key: 'completado', label: 'Completado' },
+  { key: 'archivado', label: 'Archivado' }
+];
+const CLOSED_STATUSES = ['completado', 'archivado'];
+const PRIOS = ['alta', 'media', 'baja'];
+const OWNERS_SUGGESTED = ['Beatriz Gudiño', 'Marco Reynoso', 'David Cardenas', 'Abigail Roman'];
+const TEAMS = [
+  'PDM', 'PMO', 'Sales Software Factory', 'Sales AWS', 'Sales Licencing & AI',
+  'Sales Azure', 'Sales Goverment', 'Cloud Delivery', 'Professional Services',
+  'MSP', 'FinOps', 'Obok'
+];
+const CATEGORIES = ['Skilling Path', 'Client Incentives', 'Partner Incentives', 'Seguimiento Partners', 'PDM Interno', 'Technical Validations'];
+
+const SORT_OPTIONS = [
+  { value: 'priority-due', label: 'Prioridad + Fecha' },
+  { value: 'priority',     label: 'Prioridad' },
+  { value: 'due',          label: 'Fecha límite' },
+  { value: 'age',          label: 'Antigüedad' },
+];
+
+// Nuevas constantes para Pipeline Overview
+const STAGE_META = {
+  "Pending":        {color: "#5b6576", cls: "sb-pending",    icon: "⏳"},
+  "Registered":     {color: "#075e99", cls: "sb-registered", icon: "📋"},
+  "Execution":      {color: "#1c2638", cls: "sb-execution",  icon: "⚙️"},
+  "Completed":      {color: "#47a55c", cls: "sb-completed",  icon: "✓"},
+  "Invoiced":       {color: "#6b4ca1", cls: "sb-invoiced",   icon: "💰"},
+  "Collected":      {color: "#2d8f36", cls: "sb-collected",  icon: "🏦"},
+};
+
+function uid() { return 'a_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8); }
+function stepUid() { return 's_' + Math.random().toString(36).slice(2, 9); }
+
+function getOwners(act) {
+  if (Array.isArray(act.owners)) return act.owners.filter(Boolean);
+  if (act.owner) return [act.owner];
+  return [];
+}
+
+function stepProgress(act) {
+  if (!act.steps || act.steps.length === 0) return null;
+  const done = act.steps.filter(s => s.done).length;
+  return { done, total: act.steps.length, pct: Math.round((done / act.steps.length) * 100) };
+}
+
+function isOverdue(act) {
+  if (!act.due || CLOSED_STATUSES.includes(act.status)) return false;
+  return new Date(act.due + 'T23:59:59') < new Date();
+}
+
+function fmtDate(d) {
+  if (!d) return '';
+  const [y, m, day] = d.split('-');
+  return `${day}/${m}/${y}`;
+}
+
+function daysBetween(startISO, endISO) {
+  const start = new Date(startISO);
+  const end = new Date(endISO);
+  return Math.max(0, Math.round((end - start) / (1000 * 60 * 60 * 24)));
+}
+
+function ageInfo(act) {
+  if (!act.createdAt) return null;
+  const isClosed = CLOSED_STATUSES.includes(act.status);
+  const endPoint = isClosed && act.closedAt ? act.closedAt : new Date().toISOString();
+  const days = daysBetween(act.createdAt, endPoint);
+  return { days, closed: isClosed };
+}
+
+function sortActivities(list, sortConfig) {
+  const { field, direction } = sortConfig;
+  return [...list].sort((a, b) => {
+    const prioA = PRIOS.indexOf(a.priority);
+    const prioB = PRIOS.indexOf(b.priority);
+    const dateA = a.due || '';
+    const dateB = b.due || '';
+    const dateDir = direction === 'asc' ? 1 : -1;
+    const ageCmp = () => {
+      const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return direction === 'asc' ? ta - tb : tb - ta;
+    };
+    const dateCmp = () => {
+      if (!dateA && !dateB) return 0;
+      if (!dateA) return 1;
+      if (!dateB) return -1;
+      return dateA.localeCompare(dateB) * dateDir;
+    };
+    if (field === 'priority')     return prioA - prioB;
+    if (field === 'due')          return dateCmp();
+    if (field === 'age')          return ageCmp();
+    /* priority-due */            return prioA !== prioB ? prioA - prioB : dateCmp();
+  });
+}
+
+/* ─── Multi-select dropdown ──────────────────────────────────── */
+function MultiSelectDropdown({ placeholder, options, selected, onChange }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    function onDown(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, []);
+
+  function toggle(value) {
+    onChange(selected.includes(value)
+      ? selected.filter(v => v !== value)
+      : [...selected, value]);
+  }
+
+  function getLabel(value) {
+    const opt = options.find(o => (typeof o === 'object' ? o.key : o) === value);
+    return opt ? (typeof opt === 'object' ? opt.label : opt) : value;
+  }
+
+  const triggerText = selected.length === 0
+    ? placeholder
+    : selected.length === 1
+      ? getLabel(selected[0])
+      : `${selected.length} seleccionados`;
+
+  return (
+    <div className="ms-dropdown" ref={ref}>
+      <button
+        type="button"
+        className={`ms-trigger${selected.length > 0 ? ' active' : ''}`}
+        onClick={() => setOpen(o => !o)}
+      >
+        <span className="ms-label">{triggerText}</span>
+        <span className="ms-caret">{open ? '▴' : '▾'}</span>
+      </button>
+      {open && (
+        <div className="ms-menu">
+          {options.map(opt => {
+            const value = typeof opt === 'object' ? opt.key : opt;
+            const text  = typeof opt === 'object' ? opt.label : opt;
+            const checked = selected.includes(value);
+            return (
+              <label key={value} className={`ms-option${checked ? ' checked' : ''}`}>
+                <input type="checkbox" checked={checked} onChange={() => toggle(value)} />
+                <span>{text}</span>
+              </label>
+            );
+          })}
+          {selected.length > 0 && (
+            <div style={{ borderTop: '1px solid var(--border)', padding: '6px 0' }}>
+              <button
+                type="button"
+                onClick={() => onChange([])}
+                style={{ width: '100%', textAlign: 'left' }}
+              >
+                Limpiar
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── ChartView Component ────────────────────────────────────────── */
+function ChartView({ activities, filteredActivities }) {
+  const canvasRef = useRef(null);
+  const chartRef = useRef(null);
+
+  useEffect(() => {
+    if (!canvasRef.current || filteredActivities.length === 0) return;
+
+    // Dinámicamente cargar Chart.js si no está disponible
+    if (typeof window !== 'undefined' && window.Chart) {
+      const ctx = canvasRef.current.getContext('2d');
+      const byStatus = STATUSES.map(s => ({
+        label: s.label,
+        count: filteredActivities.filter(a => a.status === s.key).length,
+      }));
+
+      if (chartRef.current) chartRef.current.destroy();
+
+      chartRef.current = new window.Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels: byStatus.map(b => b.label),
+          datasets: [{
+            data: byStatus.map(b => b.count),
+            backgroundColor: ['#5b6576', '#075e99', '#1c2638', '#47a55c', '#6b4ca1'],
+          }],
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { position: 'bottom' } },
+        },
+      });
+    }
+
+    return () => {
+      if (chartRef.current) chartRef.current.destroy();
+    };
+  }, [filteredActivities]);
+
+  if (filteredActivities.length === 0) {
+    return (
+      <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--ink-muted)' }}>
+        No hay actividades para mostrar en gráficos.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ width: '100%', maxWidth: '500px', margin: '0 auto' }}>
+      <canvas ref={canvasRef}></canvas>
+    </div>
+  );
+}
+
+/* ─── MatrizPriorizacion Component ─────────────────────────────────── */
+function MatrizPriorizacion({ activities }) {
+  const matrizData = useMemo(() => {
+    const grupos = {};
+    activities.forEach(a => {
+      const key = `${a.priority}-${a.category || 'sin-cat'}`;
+      if (!grupos[key]) grupos[key] = [];
+      grupos[key].push(a);
+    });
+    return grupos;
+  }, [activities]);
+
+  return (
+    <div className="matriz-prio">
+      <h2>Matriz de Priorización PDM</h2>
+      <table className="matriz-table">
+        <thead>
+          <tr>
+            <th>Prioridad</th>
+            <th>Categoría</th>
+            <th>Cantidad</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody>
+          {Object.entries(matrizData).map(([key, items]) => {
+            const [prio, cat] = key.split('-');
+            return (
+              <tr key={key}>
+                <td><span className={`badge badge-${prio}`}>{prio}</span></td>
+                <td>{cat}</td>
+                <td>{items.length}</td>
+                <td>
+                  <button className="btn-sm">Ver</button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* ─── PipelineOverview Component ──────────────────────────────────── */
+function PipelineOverview({ activities }) {
+  const pipelineByStage = useMemo(() => {
+    const stages = Object.keys(STAGE_META).reduce((acc, stage) => {
+      acc[stage] = { count: 0, value: 0, items: [] };
+      return acc;
+    }, {});
+
+    activities.forEach(a => {
+      const stage = a.pipeline_stage || 'Pending';
+      if (stages[stage]) {
+        stages[stage].count += 1;
+        stages[stage].value += (a.estimated_value || 0);
+        stages[stage].items.push(a);
+      }
+    });
+
+    return stages;
+  }, [activities]);
+
+  return (
+    <div className="pipeline-overview">
+      <h2>Pipeline de Oportunidades</h2>
+      <div className="pipeline-track">
+        {Object.entries(pipelineByStage).map(([stage, data]) => {
+          const meta = STAGE_META[stage] || {};
+          return (
+            <div key={stage} className="pipeline-stage" style={{ borderLeftColor: meta.color }}>
+              <div className="ps-header" style={{ backgroundColor: meta.color }}>
+                <span className="ps-icon">{meta.icon}</span>
+                <span className="ps-label">{stage}</span>
+              </div>
+              <div className="ps-body">
+                <div className="ps-count">{data.count} items</div>
+                <div className="ps-value">${data.value.toLocaleString()}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ─── IncomesCOGs Component ────────────────────────────────────────── */
+function IncomesCOGs({ activities }) {
+  const financials = useMemo(() => {
+    let totalIncome = 0;
+    let totalCOGs = 0;
+    const byOwner = {};
+
+    activities.forEach(a => {
+      if (CLOSED_STATUSES.includes(a.status)) {
+        const income = parseFloat(a.estimated_value) || 0;
+        const cogs = parseFloat(a.estimated_cogs) || 0;
+        totalIncome += income;
+        totalCOGs += cogs;
+
+        const owners = getOwners(a);
+        owners.forEach(owner => {
+          if (!byOwner[owner]) byOwner[owner] = { income: 0, cogs: 0 };
+          byOwner[owner].income += income;
+          byOwner[owner].cogs += cogs;
+        });
+      }
+    });
+
+    return {
+      totalIncome,
+      totalCOGs,
+      totalMargin: totalIncome - totalCOGs,
+      marginPct: totalIncome ? Math.round((totalIncome - totalCOGs) / totalIncome * 100) : 0,
+      byOwner,
+    };
+  }, [activities]);
+
+  return (
+    <div className="incomes-cogs">
+      <h2>Análisis Financiero</h2>
+      <div className="fc-summary">
+        <div className="fc-card">
+          <label>Ingresos Totales</label>
+          <div className="fc-value">${financials.totalIncome.toLocaleString()}</div>
+        </div>
+        <div className="fc-card">
+          <label>COGs</label>
+          <div className="fc-value">${financials.totalCOGs.toLocaleString()}</div>
+        </div>
+        <div className="fc-card">
+          <label>Margen Neto</label>
+          <div className="fc-value" style={{ color: financials.totalMargin >= 0 ? '#47a55c' : '#c73a1a' }}>
+            ${financials.totalMargin.toLocaleString()} ({financials.marginPct}%)
+          </div>
+        </div>
+      </div>
+      {Object.entries(financials.byOwner).length > 0 && (
+        <div className="fc-by-owner">
+          <h3>Por Responsable</h3>
+          <table className="fc-table">
+            <thead>
+              <tr>
+                <th>Responsable</th>
+                <th>Ingresos</th>
+                <th>COGs</th>
+                <th>Margen</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(financials.byOwner).map(([owner, data]) => (
+                <tr key={owner}>
+                  <td>{owner}</td>
+                  <td>${data.income.toLocaleString()}</td>
+                  <td>${data.cogs.toLocaleString()}</td>
+                  <td>${(data.income - data.cogs).toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Main Dashboard Component ──────────────────────────────────────── */
+export default function DashboardApp() {
+  const router = useRouter();
+  const [activities, setActivities] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [activeModule, setActiveModule] = useState('tracker');
+  const [currentView, setCurrentView] = useState('kanban');
+  
+  // Filtros
+  const [selectedStatuses, setSelectedStatuses] = useState([]);
+  const [selectedPriorities, setSelectedPriorities] = useState([]);
+  const [selectedOwners, setSelectedOwners] = useState([]);
+  const [selectedTeams, setSelectedTeams] = useState([]);
+  const [selectedCategories, setSelectedCategories] = useState([]);
+  const [sortConfig, setSortConfig] = useState({ field: 'priority-due', direction: 'desc' });
+  
+  // Edición
+  const [editingId, setEditingId] = useState(null);
+  const [editData, setEditData] = useState({});
+
+  // Cargar actividades
+  useEffect(() => {
+    async function load() {
+      try {
+        const res = await fetch('/api/activities');
+        if (res.ok) {
+          setActivities(await res.json());
+        }
+      } catch (e) {
+        console.error('Error loading activities:', e);
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  // Filtrados
+  const filteredActivities = useMemo(() => {
+    let result = [...activities];
+
+    if (selectedStatuses.length > 0) {
+      result = result.filter(a => selectedStatuses.includes(a.status));
+    }
+    if (selectedPriorities.length > 0) {
+      result = result.filter(a => selectedPriorities.includes(a.priority));
+    }
+    if (selectedOwners.length > 0) {
+      const owners = result.filter(a => getOwners(a).some(o => selectedOwners.includes(o)));
+      result = owners;
+    }
+    if (selectedTeams.length > 0) {
+      result = result.filter(a => a.team && selectedTeams.includes(a.team));
+    }
+    if (selectedCategories.length > 0) {
+      result = result.filter(a => a.category && selectedCategories.includes(a.category));
+    }
+
+    return sortActivities(result, sortConfig);
+  }, [activities, selectedStatuses, selectedPriorities, selectedOwners, selectedTeams, selectedCategories, sortConfig]);
+
+  if (loading) return <div style={{ padding: '40px', textAlign: 'center' }}>Cargando...</div>;
+
+  const allOwners = [...new Set(activities.flatMap(getOwners))].sort();
+
+  return (
+    <div className="dashboard-container">
+      {/* Encabezado */}
+      <div className="dashboard-header">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <img src={LOGO_DATA_URI} alt="iNBest" style={{ height: '40px' }} />
+          <h1>PDM Hub</h1>
+        </div>
+        <button onClick={() => router.push('/login')} style={{ color: 'var(--link)' }}>
+          Logout
+        </button>
+      </div>
+
+      {/* Navegación Modular */}
+      <div className="nav-bar">
+        {['tracker', 'matriz', 'pipeline', 'financials'].map(mod => (
+          <button
+            key={mod}
+            className={`nav-item${activeModule === mod ? ' active' : ''}`}
+            onClick={() => setActiveModule(mod)}
+          >
+            {mod === 'tracker' && '📊 Actividades'}
+            {mod === 'matriz' && '🎯 Matriz'}
+            {mod === 'pipeline' && '📈 Pipeline'}
+            {mod === 'financials' && '💰 Financieros'}
+          </button>
+        ))}
+      </div>
+
+      {/* Módulo: Activity Tracker */}
+      {activeModule === 'tracker' && (
+        <div className="module module-tracker">
+          {/* Filtros */}
+          <div className="filters-panel">
+            <MultiSelectDropdown
+              placeholder="Estados"
+              options={STATUSES}
+              selected={selectedStatuses}
+              onChange={setSelectedStatuses}
+            />
+            <MultiSelectDropdown
+              placeholder="Prioridad"
+              options={PRIOS}
+              selected={selectedPriorities}
+              onChange={setSelectedPriorities}
+            />
+            <MultiSelectDropdown
+              placeholder="Responsables"
+              options={allOwners}
+              selected={selectedOwners}
+              onChange={setSelectedOwners}
+            />
+            <MultiSelectDropdown
+              placeholder="Equipo"
+              options={TEAMS}
+              selected={selectedTeams}
+              onChange={setSelectedTeams}
+            />
+            <MultiSelectDropdown
+              placeholder="Categoría"
+              options={CATEGORIES}
+              selected={selectedCategories}
+              onChange={setSelectedCategories}
+            />
+            <select value={sortConfig.field} onChange={e => setSortConfig({ ...sortConfig, field: e.target.value })}>
+              {SORT_OPTIONS.map(opt => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Vistas */}
+          <div className="views-toggle">
+            {['kanban', 'table', 'charts'].map(v => (
+              <button
+                key={v}
+                className={`view-btn${currentView === v ? ' active' : ''}`}
+                onClick={() => setCurrentView(v)}
+              >
+                {v === 'kanban' && '📋'}
+                {v === 'table' && '📄'}
+                {v === 'charts' && '📈'}
+              </button>
+            ))}
+          </div>
+
+          {/* Contenido */}
+          {currentView === 'kanban' && (
+            <KanbanView activities={filteredActivities} STATUSES={STATUSES} />
+          )}
+          {currentView === 'table' && (
+            <TableView activities={filteredActivities} />
+          )}
+          {currentView === 'charts' && (
+            <ChartView activities={activities} filteredActivities={filteredActivities} />
+          )}
+        </div>
+      )}
+
+      {/* Módulo: Matriz */}
+      {activeModule === 'matriz' && (
+        <div className="module">
+          <MatrizPriorizacion activities={filteredActivities} />
+        </div>
+      )}
+
+      {/* Módulo: Pipeline */}
+      {activeModule === 'pipeline' && (
+        <div className="module">
+          <PipelineOverview activities={filteredActivities} />
+        </div>
+      )}
+
+      {/* Módulo: Financials */}
+      {activeModule === 'financials' && (
+        <div className="module">
+          <IncomesCOGs activities={filteredActivities} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Kanban View ───────────────────────────────────────────────────── */
+function KanbanView({ activities, STATUSES }) {
+  const byStatus = STATUSES.map(s => ({
+    ...s,
+    items: activities.filter(a => a.status === s.key),
+  }));
+
+  return (
+    <div className="kanban">
+      {byStatus.map(col => (
+        <div key={col.key} className="kcol">
+          <h3>{col.label} <span className="n">{col.items.length}</span></h3>
+          {col.items.map(a => (
+            <ActivityCard key={a.id} activity={a} />
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ─── Table View ────────────────────────────────────────────────────── */
+function TableView({ activities }) {
+  return (
+    <div className="table-view">
+      <table className="activities-table">
+        <thead>
+          <tr>
+            <th>Actividad</th>
+            <th>Estado</th>
+            <th>Responsable</th>
+            <th>Fecha Límite</th>
+            <th>Prioridad</th>
+          </tr>
+        </thead>
+        <tbody>
+          {activities.map(a => (
+            <tr key={a.id}>
+              <td>{a.title}</td>
+              <td><span className={`badge badge-${a.status}`}>{a.status}</span></td>
+              <td>{getOwners(a).join(', ') || '—'}</td>
+              <td>{fmtDate(a.due) || '—'}</td>
+              <td><span className={`badge badge-${a.priority}`}>{a.priority}</span></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* ─── Activity Card ─────────────────────────────────────────────────── */
+function ActivityCard({ activity }) {
+  const prog = stepProgress(activity);
+  const overdue = isOverdue(activity);
+
+  return (
+    <div className={`activity-card${overdue ? ' overdue' : ''}`}>
+      <div className="card-title">{activity.title}</div>
+      {activity.description && <div className="card-desc">{activity.description}</div>}
+      
+      <div className="card-meta">
+        <span className={`badge badge-${activity.priority}`}>{activity.priority}</span>
+        {activity.category && <span className="badge">{activity.category}</span>}
+      </div>
+
+      {activity.due && (
+        <div className="card-date">{fmtDate(activity.due)}</div>
+      )}
+
+      {prog && (
+        <div className="card-progress">
+          <div className="progress-bar">
+            <div className="progress-fill" style={{ width: `${prog.pct}%` }}></div>
+          </div>
+          <small>{prog.done}/{prog.total}</small>
+        </div>
+      )}
+
+      {activity.steps && activity.steps.length > 0 && (
+        <div className="card-steps">
+          {activity.steps.map(step => (
+            <div key={step.id} className={`step${step.done ? ' done' : ''}`}>
+              <input type="checkbox" defaultChecked={step.done} />
+              <span>{step.title}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
